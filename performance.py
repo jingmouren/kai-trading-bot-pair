@@ -19,12 +19,6 @@ class Trading:
         return data.diff().abs().sum(axis=1)
 
 
-import os
-os.chdir('/Users/kq/pair/')
-import seaborn as sns
-from utils import *
-
-
 class Performance:
     
     def __init__(self):
