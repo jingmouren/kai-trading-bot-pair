@@ -113,7 +113,7 @@ class Performance:
                 data['CAPITAL_USAGE'] = data.SPREAD_POSITION.abs() * (np.exp(data[y]) + (data.BETA * np.exp(data[x])).abs()).fillna(0)
 
                 # PNL calculation based on spread position (-1, 0, 1)
-                # The spread is defined as s = y - bx (intercept excluded in calc)
+                # The spread is defined as s = bx - y  (intercept excluded in calc)
                 prices = np.exp(data[[x, y, 'BETA']])
                 data['PNL'] = (data.SPREAD_POSITION * ((prices[x] * prices.BETA) - prices[y])).fillna(0)
 
