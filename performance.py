@@ -115,7 +115,7 @@ class Performance:
                 # PNL calculation based on spread position (-1, 0, 1)
                 # The spread is defined as s = bx - y  (intercept excluded in calc)
                 prices = np.exp(data[[x, y, 'BETA']])
-                data['PNL'] = (data.SPREAD_POSITION * ((prices[x] * prices.BETA) - prices[y])).fillna(0)
+                data['PNL'] = data.SPREAD_POSITION * (-np.exp(data[y]).diff() + (data.BETA * np.exp(data[x]).diff())).fillna(0)
 
                 # Isolate month-to-month
                 data = data.loc[start: end]
