@@ -1,3 +1,4 @@
+from tools import *
 from utils import *
 
 __author__ = 'kq'
@@ -101,7 +102,7 @@ class Performance:
                 data = pd.read_csv(HOME + '/spread/pairs/{}_{}.csv'.format(x,y), index_col=0)
 
                 # Z-score the spread and sell +ksigma, buy -ksigma
-                data['ZSCORE'] = zscore(data.SPREAD, nan_policy='omit')
+                data['ZSCORE'] = zscore(data.SPREAD.loc[:start].dropna(), nan_policy='omit')
                 data['SIGNAL'] = np.where(data.ZSCORE >= threshold, -1, 
                                           np.where(data.ZSCORE <= -threshold, 1, 0))
 
@@ -113,7 +114,8 @@ class Performance:
 
                 # PNL calculation based on spread position (-1, 0, 1)
                 # The spread is defined as s = y - bx (intercept excluded in calc)
-                data['PNL'] = data.SPREAD_POSITION * (np.exp(data[y]).diff() - (data.BETA * np.exp(data[x]).diff())).fillna(0)
+                prices = np.exp(data[[x, y, 'BETA']])
+                data['PNL'] = (data.SPREAD_POSITION * ((prices[x] * prices.BETA) - prices[y])).fillna(0)
 
                 # Isolate month-to-month
                 data = data.loc[start: end]
@@ -142,4 +144,16 @@ class Performance:
         stack = pd.concat([stack, pd.DataFrame(stack.PAIR.str.split('-', n=1, expand=True), index=stack.index)], axis=1).rename(columns={0: 'ASSET_1', 1: 'ASSET_2'})
         concentration = stack.groupby(['DATE', 'ASSET_1']).POSITION.sum() + stack.groupby(['DATE', 'ASSET_2']).POSITION.sum()
 
-        return pnl, cap, turnover, concentration        
+        returns = (pnl.fillna(0).sum(1).sort_index() / cap.fillna(0).sum(1).sort_index()).dropna()
+        returns.index = pd.DatetimeIndex(returns.index)     
+        return returns
+
+    @classmethod
+    def simple_report(cls, returns: pd.Series) -> pd.DataFrame:
+        perf = Performance()
+        sharpe = perf.fetch_sharpe(returns=returns, horizon=perf.horizon)
+        sortino = perf.fetch_sortino(returns=returns, horizon=perf.horizon)
+        cumret = perf.fetch_cumulative_returns(returns=returns).iloc[-1]
+        simpret = perf.fetch_sum_returns(returns=returns).iloc[-1]
+        return pd.DataFrame([sharpe, sortino, cumret, simpret], 
+                     index=['SHARPE', 'SORTINO', 'CUMULATIVE_RETURN', 'SIMPLE_RETURN']).rename(columns={0: 'PERFORMANCE'})
