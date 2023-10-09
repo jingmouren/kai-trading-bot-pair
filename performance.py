@@ -1,7 +1,10 @@
+import multiprocess as mp
+from multiprocessing import cpu_count
 from tools import *
 from utils import *
 
 __author__ = 'kq'
+
 
 class Trading:
 
@@ -24,8 +27,10 @@ class Performance:
     
     def __init__(self):
         
-        self.horizon = 252
+        self.horizon = 252        
+        self.quantile_window = 20
         self.styles = ['BASELINE', 'MAX_WEIGHT', 'MAXIMAL', 'APPROX_MAXIMAL']
+        self.tau = 0.25
         
     @classmethod
     def fetch_cumulative_returns(cls, returns: pd.Series) -> pd.Series:
@@ -36,11 +41,11 @@ class Performance:
         return returns.fillna(0).cumsum()
 
     @classmethod    
-    def fetch_sharpe(cls, returns: pd.Series, horizon: float) -> float:
+    def fetch_sharpe(cls, returns: pd.Series, horizon: int = 252) -> float:
         return np.sqrt(horizon) * returns.mean() / returns.std()
 
     @classmethod    
-    def fetch_sortino(cls, returns: pd.Series, horizon: float) -> float:
+    def fetch_sortino(cls, returns: pd.Series, horizon: int = 252) -> float:
         return np.sqrt(horizon) * returns.mean() / returns[returns < 0].std()        
 
     @classmethod
@@ -84,69 +89,73 @@ class Performance:
         returns_summary = returns_summary.round(2)
         display(returns_summary.iloc[1:].style.background_gradient(axis=1).format(precision=2))    
         
-    @classmethod        
-    def fetch_performance(cls, style: str = 'MAX_WEIGHT', threshold: float = 2) -> List[pd.DataFrame]:
+    @classmethod
+    def run_trade(cls, data: Tuple[str, str, str], bound_window: int = 20) -> pd.DataFrame:
+
+        perf = Performance()
+        start, end, style = data
+        pnl={}
+        cap={}
+        optimal_pairs = fetch_optimal_pairs(date=start, style=style)
+        for pair in optimal_pairs:
+            x, y = pair.split('-')
+            data = pd.read_csv(HOME + '/spread/pairs/{}_{}.csv'.format(x,y), index_col=0)
+
+            # Tauhid's method, not used
+            data['LB'] = data.SPREAD.rolling(bound_window).quantile(perf.tau, interpolation='midpoint')
+            data['UB'] = data.SPREAD.rolling(bound_window).quantile(1-perf.tau, interpolation='midpoint')
+
+
+            # Subtract median, normalize by IQR
+            data['QSCORE'] = (((data.SPREAD - data.rolling(bound_window).SPREAD.median()) / (data.rolling(bound_window).SPREAD.quantile(perf.tau) - data.rolling(bound_window).SPREAD.quantile(1 - perf.tau))))
+
+            # Rolling z-score, not used
+            data['ZSCORE'] = (data.SPREAD - data.SPREAD.rolling(bound_window).mean()) / data.SPREAD.rolling(bound_window).std()
+
+            # Scale by sign function and magnitude (second order)
+            data['SIGNAL'] = np.sign(data.QSCORE) * np.round(data.QSCORE.abs())  
+
+            # Lag to prevent lookahead bias
+            data['SPREAD_POSITION'] = data.SIGNAL.shift()
+
+            # Capital usage based on spread
+            data['CAPITAL_USAGE'] = data.SPREAD_POSITION.abs() * (np.exp(data[y]) + (data.BETA * np.exp(data[x])).abs()).fillna(0)
+
+            # PNL calculation based on spread position 
+            # The spread is defined as s = y - bx (intercept excluded in calc)
+            prices = np.exp(data[[x, y, 'BETA']])
+            data['PNL'] = data.SPREAD_POSITION * (prices[y].diff() + (-np.log(prices.BETA) * prices[x].diff())).fillna(0)
+
+
+            # Isolate month-to-month
+            data = data.loc[start: end]
+
+            data.index = pd.DatetimeIndex(data.index)
+            pnl[pair] = data.PNL    
+            cap[pair] = data.CAPITAL_USAGE
+
+        # Calcualte returns based on dollars generated per capital usage
+        return pd.DataFrame(pnl).sum(axis=1) / pd.DataFrame(cap).sum(axis=1)
+
+    @classmethod
+    def run_history(cls, style: str = 'MAX_WEIGHT') -> None:
+
+        data_list = []
 
         # Get available dates
         dates = [pd.to_datetime(j.split('/spread/')[1].split('.')[0]).strftime('%Y-%m-%d') 
                  for j in sorted(glob.glob(HOME + '/spread/202*.csv'))]
 
-        pnl, pos, cap, conc = {}, {}, {}, {}
         for j in range(len(dates) - 1):
             start, end = dates[j], dates[j+1]
+            data_list.append([start, end, style])
 
-            # Fetch pairs for given start date and style
-            optimal_pairs = fetch_optimal_pairs(date=start, style=style)
-            for pair in optimal_pairs:
-                x, y = pair.split('-')
-                data = pd.read_csv(HOME + '/spread/pairs/{}_{}.csv'.format(x,y), index_col=0)
-
-                # Z-score the spread and sell +ksigma, buy -ksigma
-                data['ZSCORE'] = zscore(data.SPREAD.loc[:start].dropna(), nan_policy='omit')
-                data['SIGNAL'] = np.where(data.ZSCORE >= threshold, -1, 
-                                          np.where(data.ZSCORE <= -threshold, 1, 0))
-
-                # Lag to prevent lookahead bias
-                data['SPREAD_POSITION'] = data.SIGNAL.shift()
-
-                # Capital usage based on spread
-                data['CAPITAL_USAGE'] = data.SPREAD_POSITION.abs() * (np.exp(data[y]) + (data.BETA * np.exp(data[x])).abs()).fillna(0)
-
-                # PNL calculation based on spread position (-1, 0, 1)
-                # The spread is defined as s = bx - y  (intercept excluded in calc)
-                prices = np.exp(data[[x, y, 'BETA']])
-                data['PNL'] = data.SPREAD_POSITION * (-np.exp(data[y]).diff() + (data.BETA * np.exp(data[x]).diff())).fillna(0)
-
-                # Isolate month-to-month
-                data = data.loc[start: end]
-                
-                # Hash
-                pnl[pair] = data.PNL
-                pos[pair] = data.SPREAD_POSITION
-                cap[pair] = data.CAPITAL_USAGE
-
-        # Profit over time
-        pnl = pd.concat(pnl, axis=1)
-        pnl.index = pd.DatetimeIndex(pnl.index).date
-
-        # Capital usage over time
-        cap = pd.concat(cap, axis=1)
-        cap.index = pd.DatetimeIndex(cap.index).date
-
-        # Turnover is defined as the daily cross-sectional sum of absolute differences
-        turnover = pd.concat(pos, axis=1).fillna(0).diff().abs().sum(1)
-        turnover.index = pd.DatetimeIndex(turnover.index).date
-
-        # Concentration over time
-        stack = pd.concat(pos, axis=1).stack().reset_index()
-        stack.columns = ['DATE', 'PAIR', 'POSITION']
-        stack = stack[stack.POSITION != 0].fillna(0)
-        stack = pd.concat([stack, pd.DataFrame(stack.PAIR.str.split('-', n=1, expand=True), index=stack.index)], axis=1).rename(columns={0: 'ASSET_1', 1: 'ASSET_2'})
-        concentration = stack.groupby(['DATE', 'ASSET_1']).POSITION.sum() + stack.groupby(['DATE', 'ASSET_2']).POSITION.sum()
-
-        returns = (pnl.fillna(0).sum(1).sort_index() / cap.fillna(0).sum(1).sort_index()).dropna()
-        returns.index = pd.DatetimeIndex(returns.index)     
-        return returns
+        with mp.Pool(cpu_count()) as p:
+            output = list(p.map(run_trade,data_list))
+            p.close()
+            p.terminate()    
+        returns = pd.concat(output, axis=0).sort_index()
+        perf.simple_report(returns)
 
     @classmethod
     def simple_report(cls, returns: pd.Series) -> pd.DataFrame:
